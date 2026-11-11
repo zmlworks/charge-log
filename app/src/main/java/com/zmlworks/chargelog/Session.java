@@ -1,93 +1,155 @@
 package com.zmlworks.chargelog;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.Reader;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Locale;
 
 /**
- * One charging session: raw battery samples plus the derived numbers (normalized current, power, integrated mAh/mWh).
- * Pure Java so the normalization and integration can be unit-tested.
+ * One recording (charge or discharge), in memory only: raw battery samples plus derived numbers (normalized current,
+ * power, integrated mAh/mWh). Pure Java so normalization and integration can be unit-tested.
  *
- * <p>CURRENT_NOW differs between vendors: µA (documented) or mA, and positive or negative while charging. Both are
- * decided from the whole session so far and the totals are rebuilt when a decision changes:
+ * <p>Internally current is signed "into the battery" (charging positive). Getters named {@code shown…} flip a
+ * discharge session so that used mAh, used Wh and discharge W are positive.
+ *
+ * <p>CURRENT_NOW differs between vendors (µA or mA; charging positive or negative). Unless fixed by {@link Interp}:
  * <ul>
  * <li>unit: µA once any |raw| ≥ 20000 (20 A in mA is impossible for a phone), otherwise mA;</li>
- * <li>sign: the sum of raw values over samples whose status is CHARGING must be positive, otherwise everything is
- * negated.</li>
+ * <li>sign: unplugged samples must be discharging and samples charging below 90 % should be charging; if the votes
+ * say the reverse, everything is negated.</li>
  * </ul>
+ * When a decision changes the totals are rebuilt from the raw samples, so changing a setting re-reads the session.
  */
 final class Session {
     static final int MISSING = Integer.MIN_VALUE;
     static final int STATUS_CHARGING = 2;   // BatteryManager.BATTERY_STATUS_CHARGING
     static final int UA_THRESHOLD = 20000;
+    /** Longer gaps (phone asleep) are bridged with CHARGE_COUNTER when available instead of interpolating current. */
+    static final long GAP_MS = 15_000;
 
     static final class Sample {
         final long t;         // ms since session start
         final int level;      // %
         final int raw;        // CURRENT_NOW as reported, MISSING if unsupported
-        final int mv;         // voltage mV
+        final int rawV;       // EXTRA_VOLTAGE as reported
         final int deciC;      // temperature 0.1 °C
         final int counter;    // CHARGE_COUNTER µAh, MISSING if unsupported
         final int status;     // BatteryManager.BATTERY_STATUS_*
+        final boolean plugged;
 
-        Sample(long t, int level, int raw, int mv, int deciC, int counter, int status) {
-            this.t = t; this.level = level; this.raw = raw; this.mv = normVoltage(mv);
-            this.deciC = deciC; this.counter = counter > 0 ? counter : MISSING; this.status = status;
+        Sample(long t, int level, int raw, int rawV, int deciC, int counter, int status, boolean plugged) {
+            this.t = t; this.level = level; this.raw = raw; this.rawV = rawV; this.deciC = deciC;
+            this.counter = counter > 0 ? counter : MISSING; this.status = status; this.plugged = plugged;
         }
     }
 
-    /** Some devices report EXTRA_VOLTAGE in volts. */
-    static int normVoltage(int v) { return v > 0 && v < 100 ? v * 1000 : v; }
-
-    final long start;   // wall clock ms
-    final int plug;     // BatteryManager.BATTERY_PLUGGED_*
+    final long start;       // wall clock ms
+    final boolean charge;
+    final int dir;          // +1 charge, -1 discharge (for the shown values)
+    int plug;               // BatteryManager.BATTERY_PLUGGED_*
+    int chargerUv = MISSING, chargerUa = MISSING;   // max_charging_voltage / max_charging_current extras
     final ArrayList<Sample> samples = new ArrayList<>();
 
-    private boolean microAmps, anyCurrent;
+    private Interp interp;
+    // auto-detection evidence (raw, independent of the interpretation)
+    private boolean sawUa, anyCurrent;
+    private int maVotes, signVotes, unpluggedNeg, unpluggedPos;
     private int firstCounter = MISSING;
+    // derived
+    private boolean microAmps;
     private int sign = 1;
-    private long chargingRawSum;
-    private float[] ma = new float[64], watt = new float[64], acc = new float[64];
+    private float[] ma = new float[256], watt = new float[256], acc = new float[256];
+    private int[] mv = new int[256];
     private double mah, mwh;
+    private float maxW;
 
-    Session(long start, int plug) { this.start = start; this.plug = plug; }
+    Session(long start, boolean charge, int plug, Interp interp) {
+        this.start = start; this.charge = charge; this.dir = charge ? 1 : -1; this.plug = plug; this.interp = interp;
+    }
 
     void add(Sample s) {
         samples.add(s);
         if (firstCounter == MISSING) firstCounter = s.counter;
-        boolean rebuild = false;
+        boolean firstCurrent = !anyCurrent && s.raw != MISSING;
         if (s.raw != MISSING) {
-            if (!anyCurrent) { anyCurrent = true; rebuild = true; }
-            if (!microAmps && Math.abs((long) s.raw) >= UA_THRESHOLD) { microAmps = true; rebuild = true; }
-            if (s.status == STATUS_CHARGING) {
-                chargingRawSum += s.raw;
-                int ns = chargingRawSum < 0 ? -1 : 1;
-                if (ns != sign) { sign = ns; rebuild = true; }
+            anyCurrent = true;
+            int a = Math.abs(s.raw);
+            if (a >= UA_THRESHOLD) sawUa = true;
+            if (a >= 50) {
+                if (!s.plugged) {
+                    signVotes += s.raw < 0 ? 1 : -1;
+                    if (s.raw < 0) unpluggedNeg++; else unpluggedPos++;
+                } else if (s.status == STATUS_CHARGING && s.level < 90) {
+                    signVotes += s.raw > 0 ? 1 : -1;
+                    if (a >= 300 && a < UA_THRESHOLD) maVotes++;
+                }
             }
         }
         int n = samples.size();
         if (n > ma.length) {
-            ma = Arrays.copyOf(ma, n * 2); watt = Arrays.copyOf(watt, n * 2); acc = Arrays.copyOf(acc, n * 2);
+            ma = Arrays.copyOf(ma, n * 2); watt = Arrays.copyOf(watt, n * 2); acc = Arrays.copyOf(acc, n * 2); mv = Arrays.copyOf(mv, n * 2);
         }
-        if (rebuild) { mah = mwh = 0; for (int i = 0; i < n; i++) step(i); }
-        else step(n - 1);
+        if (decide() | firstCurrent) rebuild(); else step(n - 1);
+    }
+
+    void setInterp(Interp i) {
+        interp = i;
+        decide();
+        rebuild();
+    }
+
+    /** Applies the interpretation; true if unit or sign changed. */
+    private boolean decide() {
+        int fu = interp.fixedUnit(), fs = interp.fixedSign();
+        boolean u = fu != Interp.AUTO ? fu == Interp.UNIT_UA : sawUa;
+        int sg = fs != Interp.AUTO ? (fs == Interp.SIGN_INVERT ? -1 : 1) : (signVotes < 0 ? -1 : 1);
+        boolean changed = u != microAmps || sg != sign;
+        microAmps = u;
+        sign = sg;
+        return changed;
+    }
+
+    private void rebuild() {
+        mah = mwh = 0;
+        maxW = 0;
+        for (int i = 0; i < samples.size(); i++) step(i);
     }
 
     private void step(int i) {
         Sample s = samples.get(i);
+        mv[i] = interp.mv(s.rawV);
         ma[i] = s.raw == MISSING ? Float.NaN : (float) (sign * (microAmps ? s.raw / 1000.0 : s.raw));
-        watt[i] = ma[i] * s.mv / 1e6f;
-        if (i > 0 && !Float.isNaN(ma[i]) && !Float.isNaN(ma[i - 1])) {
-            double h = (s.t - samples.get(i - 1).t) / 3_600_000.0;
-            mah += (ma[i] + ma[i - 1]) / 2.0 * h;
-            mwh += (watt[i] + watt[i - 1]) / 2.0 * 1000 * h;
+        watt[i] = ma[i] * mv[i] / 1e6f;
+        if (i > 0) {
+            Sample p = samples.get(i - 1);
+            double h = (s.t - p.t) / 3_600_000.0;
+            if (s.t - p.t > GAP_MS && s.counter != MISSING && p.counter != MISSING) {
+                double d = (s.counter - p.counter) / 1000.0;
+                mah += d;
+                mwh += d * (mv[i] + mv[i - 1]) / 2000.0;
+            } else if (!Float.isNaN(ma[i]) && !Float.isNaN(ma[i - 1])) {
+                mah += (ma[i] + ma[i - 1]) / 2.0 * h;
+                mwh += (watt[i] + watt[i - 1]) / 2.0 * 1000 * h;
+            }
         }
-        acc[i] = (float) (hasCurrent() ? mah : counterMahAt(i));
+        acc[i] = (float) (anyCurrent ? mah : counterMahAt(i));
+        if (!Float.isNaN(watt[i]) && dir * watt[i] > maxW) maxW = dir * watt[i];
     }
 
+    // ---- auto detection worth remembering for later sessions ----
+    /** UNIT_UA once a reading was clearly µA; UNIT_MA after 30 readings while charging below 90 % that are only
+     *  plausible in mA (0.3–20 A, never a µA-sized value); otherwise AUTO. */
+    int confidentUnit() { return sawUa ? Interp.UNIT_UA : maVotes >= 30 ? Interp.UNIT_MA : Interp.AUTO; }
+
+    /** From unplugged readings (always a discharge): at least 30 with 90 % or more on one side. */
+    int confidentSign() {
+        int n = unpluggedNeg + unpluggedPos;
+        if (n < 30) return Interp.AUTO;
+        if (unpluggedNeg * 10 >= n * 9) return Interp.SIGN_AS_IS;
+        if (unpluggedPos * 10 >= n * 9) return Interp.SIGN_INVERT;
+        return Interp.AUTO;
+    }
+
+    // ---- values ----
     int size() { return samples.size(); }
     Sample last() { return samples.isEmpty() ? null : samples.get(samples.size() - 1); }
     long elapsedMs() { return samples.isEmpty() ? 0 : last().t; }
@@ -97,18 +159,22 @@ final class Session {
     boolean microAmps() { return microAmps; }
     boolean inverted() { return sign < 0; }
 
-    /** Charged mAh: integrated current, or the CHARGE_COUNTER difference when the device has no current reading. */
-    double mah() { return hasCurrent() ? mah : counterMah(); }
-    /** Energy into the battery (V×I integrated), NaN without a current reading. */
-    double wh() { return hasCurrent() ? mwh / 1000.0 : Double.NaN; }
-    double avgW() { double h = elapsedMs() / 3_600_000.0; return h > 0 ? wh() / h : Double.NaN; }
-    float maAt(int i) { return ma[i]; }
-    float wAt(int i) { return watt[i]; }
-    float accAt(int i) { return acc[i]; }
-    double currentMa() { return samples.isEmpty() ? Double.NaN : ma[samples.size() - 1]; }
-    double currentW() { return samples.isEmpty() ? Double.NaN : watt[samples.size() - 1]; }
+    /** Net mAh into the battery: integrated current, or the CHARGE_COUNTER difference without a current reading. */
+    double mah() { return anyCurrent ? mah : counterMah(); }
+    double wh() { return anyCurrent ? mwh / 1000.0 : Double.NaN; }
 
-    /** CHARGE_COUNTER difference (µAh → mAh) between the first and the last sample that have it; NaN if none. */
+    double shownMah() { return dir * mah(); }
+    double shownWh() { return dir * wh(); }
+    double avgW() { double h = elapsedMs() / 3_600_000.0; return h > 0 ? shownWh() / h : Double.NaN; }
+    double maxW() { return anyCurrent ? maxW : Double.NaN; }
+    float shownAccAt(int i) { return dir * acc[i]; }
+    float shownWAt(int i) { return dir * watt[i]; }
+    float shownAAt(int i) { return dir * ma[i] / 1000f; }
+    double shownW() { return samples.isEmpty() ? Double.NaN : shownWAt(samples.size() - 1); }
+    double shownA() { return samples.isEmpty() ? Double.NaN : shownAAt(samples.size() - 1); }
+    int mvNow() { return samples.isEmpty() ? 0 : mv[samples.size() - 1]; }
+
+    /** CHARGE_COUNTER difference (µAh → mAh), signed into the battery; NaN if unsupported. */
     double counterMah() { return counterMahAt(samples.size() - 1); }
 
     private double counterMahAt(int i) {
@@ -117,44 +183,11 @@ final class Session {
         return firstCounter == MISSING || lastC == MISSING ? Double.NaN : (lastC - firstCounter) / 1000.0;
     }
 
-    // ---- file format: "key=value" header lines, then one CSV line per sample ----
-    static final String COLUMNS = "t_ms,level,current_raw,voltage_mv,temp_decic,counter_uah,status";
-
-    String header() {
-        return "# chargelog 1\nstart=" + start + "\nplug=" + plug + "\n" + COLUMNS + "\n";
-    }
-
-    static String line(Sample s) {
-        return String.format(Locale.ROOT, "%d,%d,%s,%d,%d,%s,%d\n", s.t, s.level, s.raw == MISSING ? "" : Integer.toString(s.raw),
-                s.mv, s.deciC, s.counter == MISSING ? "" : Integer.toString(s.counter), s.status);
-    }
-
-    static Session read(Reader r) throws IOException {
-        BufferedReader in = new BufferedReader(r);
-        long start = 0;
-        int plug = 0;
-        Session s = null;
-        String l;
-        while ((l = in.readLine()) != null) {
-            if (l.isEmpty() || l.startsWith("#")) continue;
-            if (s == null) {
-                if (l.startsWith("start=")) start = Long.parseLong(l.substring(6));
-                else if (l.startsWith("plug=")) plug = Integer.parseInt(l.substring(5));
-                else if (l.equals(COLUMNS)) s = new Session(start, plug);
-                continue;
-            }
-            String[] f = l.split(",", -1);
-            if (f.length < 7) break;   // torn last line (killed while writing)
-            try {
-                s.add(new Sample(Long.parseLong(f[0]), Integer.parseInt(f[1]), f[2].isEmpty() ? MISSING : Integer.parseInt(f[2]),
-                        Integer.parseInt(f[3]), Integer.parseInt(f[4]), f[5].isEmpty() ? MISSING : Integer.parseInt(f[5]),
-                        Integer.parseInt(f[6])));
-            } catch (NumberFormatException e) {
-                break;
-            }
-        }
-        if (s == null) throw new IOException("not a chargelog file");
-        return s;
+    /** Battery capacity implied by this session (mAh per 100 %), once the level moved by 5 % or more. */
+    double estCapacity() {
+        int d = Math.abs(levelGain());
+        double m = Math.abs(mah());
+        return d < 5 || Double.isNaN(m) ? Double.NaN : m * 100.0 / d;
     }
 
     // ---- formatting ----
@@ -173,5 +206,20 @@ final class Session {
             case 8: return "ドック";
             default: return "—";
         }
+    }
+
+    /** Charger description from the plug type and the max_charging_voltage (µV) / max_charging_current (µA) extras. */
+    static String charger(int plug, int uv, int ua) {
+        if (plug == 0) return "—";
+        double v = uv == MISSING || uv <= 0 ? 0 : uv > 100_000 ? uv / 1e6 : uv > 100 ? uv / 1e3 : uv;
+        double a = ua == MISSING || ua <= 0 ? 0 : ua > 20_000 ? ua / 1e6 : ua / 1e3;
+        if (v == 0 && a == 0) return plugName(plug) + " (電圧 不明)";
+        StringBuilder b = new StringBuilder(plugName(plug));
+        if (v > 0) b.append(String.format(Locale.ROOT, " %.1fV", v));
+        if (a > 0) b.append(String.format(Locale.ROOT, " %.2fA", a));
+        if (v >= 8.5) b.append(" (急速・高電圧)");
+        else if (v > 0 && a > 0 && v * a >= 15) b.append(" (急速)");
+        else if (v > 0 && a > 0) b.append(" (通常)");
+        return b.toString();
     }
 }

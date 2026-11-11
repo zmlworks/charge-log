@@ -4,7 +4,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- keeps sampling with the screen off, only while plugged in -->
+    <!-- keeps sampling with the screen off, only while charging -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
@@ -24,8 +24,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity android:name=".HistoryActivity" android:exported="false" />
-        <activity android:name=".SessionActivity" android:exported="false" />
+        <activity android:name=".SettingsActivity" android:exported="false" />
         <service
             android:name=".ChargeService"
             android:exported="false"

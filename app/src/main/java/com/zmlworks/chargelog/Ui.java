@@ -10,8 +10,8 @@ import android.view.WindowInsets;
 final class Ui {
     private Ui() {}
 
-    static final int BG = 0xFF002218, TEXT = 0xFFC6CFC6, ACCENT = 0xFF3D0105, HI = 0xFF00A2E8,
-            PANEL = 0xFF0A3226, GRID = 0xFF1E4A3C, DIM = 0xFF7F8F86;
+    static final int BG = 0xFF1C1D20, TEXT = 0xFFE4E5E7, HI = 0xFF4FB3FF,
+            PANEL = 0xFF2A2C30, GRID = 0xFF383B40, DIM = 0xFF9AA0A6;
 
     /** Android 15 forces edge-to-edge; we opt in on every version and pad the root by the bar/IME insets. */
     @SuppressWarnings("deprecation")

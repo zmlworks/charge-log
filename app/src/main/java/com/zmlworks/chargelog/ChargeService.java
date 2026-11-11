@@ -9,6 +9,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.os.BatteryManager;
 import android.os.Build;
@@ -18,41 +19,33 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
 
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.OutputStreamWriter;
-import java.nio.charset.StandardCharsets;
-
 /**
- * Foreground service that waits for a charger. While plugged in it samples the battery every second into a
- * {@link Session} (kept in memory for the screen and appended to a file); unplugging ends the session and it waits
- * for the next connection until the user stops it.
+ * Foreground service that records the battery in memory. Unplugged it records a discharge session; plugging in
+ * throws that away and starts a charge session; unplugging keeps the finished charge as {@link #finished} and starts a
+ * new discharge session. Nothing is written to storage.
  */
 public final class ChargeService extends Service {
-    static final String ACTION_STOP = "stop";
+    static final String ACTION_STOP = "stop", ACTION_RESET = "reset";
     private static final String CHANNEL = "charge";
     private static final int NOTIF = 1;
-    private static final long PERIOD_MS = 1000;
 
     /** Read by the activities on the main thread (the service also runs there). */
     static boolean running;
-    static Session live;
+    static Session live, finished;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private BatteryManager bm;
     private NotificationManager nm;
     private PowerManager.WakeLock wake;
+    private SharedPreferences prefs;
+    private Interp interp = Interp.DEFAULT;
     private Intent battery;
-    private BufferedWriter out;
-    private File file;
     private long t0, lastNotif;
     private boolean registered;
 
     static void start(Context c) { c.startForegroundService(new Intent(c, ChargeService.class)); }
 
-    static void stop(Context c) { c.startService(new Intent(c, ChargeService.class).setAction(ACTION_STOP)); }
+    static void send(Context c, String action) { c.startService(new Intent(c, ChargeService.class).setAction(action)); }
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) {
@@ -62,10 +55,16 @@ public final class ChargeService extends Service {
         }
     };
 
+    private final SharedPreferences.OnSharedPreferenceChangeListener prefsListener = (p, k) -> {
+        interp = Prefs.interp(this);
+        if (live != null) live.setInterp(interp);
+        if (finished != null) finished.setInterp(interp);
+    };
+
     private final Runnable tick = new Runnable() {
         @Override public void run() {
             sample();
-            handler.postDelayed(this, PERIOD_MS);
+            handler.postDelayed(this, Prefs.intervalMs(ChargeService.this));
         }
     };
 
@@ -75,16 +74,31 @@ public final class ChargeService extends Service {
         super.onCreate();
         bm = getSystemService(BatteryManager.class);
         nm = getSystemService(NotificationManager.class);
+        prefs = Prefs.sp(this);
+        interp = Prefs.interp(this);
+        prefs.registerOnSharedPreferenceChangeListener(prefsListener);
         NotificationChannel ch = new NotificationChannel(CHANNEL, getString(R.string.channel), NotificationManager.IMPORTANCE_LOW);
         ch.setShowBadge(false);
         nm.createNotificationChannel(ch);
+        // 0.1.0 saved sessions as files; 0.2.0 keeps everything in memory, so remove them
+        java.io.File[] old = new java.io.File(getFilesDir(), "sessions").listFiles();
+        if (old != null) for (java.io.File f : old) if (!f.delete()) f.deleteOnExit();
+        if (!new java.io.File(getFilesDir(), "sessions").delete()) { /* not there */ }
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+        String a = intent == null ? null : intent.getAction();
+        if (ACTION_STOP.equals(a)) {
             shutdown();
             stopSelf();
             return START_NOT_STICKY;
+        }
+        if (ACTION_RESET.equals(a)) {
+            if (!running) { stopSelf(); return START_NOT_STICKY; }
+            finished = null;
+            live = null;
+            check();
+            return START_STICKY;
         }
         try {
             if (Build.VERSION.SDK_INT >= 34) startForeground(NOTIF, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
@@ -111,72 +125,72 @@ public final class ChargeService extends Service {
     private void check() {
         if (!running) return;
         int p = plugged();
-        if (p != 0 && live == null) begin(p);
-        else if (p == 0 && live != null) end();
+        if (p != 0 && (live == null || !live.charge)) begin(true, p);              // discharge record is dropped
+        else if (p == 0 && (live == null || live.charge)) {
+            if (live != null && live.size() >= 3) finished = live;                  // keep the charge result
+            begin(false, 0);
+        }
     }
 
-    private void begin(int plug) {
-        live = new Session(System.currentTimeMillis(), plug);
+    private void begin(boolean charge, int plug) {
+        if (charge) finished = null;
+        live = new Session(System.currentTimeMillis(), charge, plug, interp);
         t0 = SystemClock.elapsedRealtime();
-        file = Store.file(this, live.start);
-        try {
-            out = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file), StandardCharsets.UTF_8));
-            out.write(live.header());
-        } catch (IOException e) {
-            out = null;
-        }
-        wake = getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "chargelog:session");
-        wake.setReferenceCounted(false);
-        wake.acquire(24 * 3600_000L);   // only while plugged in; released on unplug
+        // CPU stays awake only while charging; a discharge record bridges sleep with CHARGE_COUNTER (see Session)
+        if (charge) {
+            if (wake == null) {
+                wake = getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "chargelog:charge");
+                wake.setReferenceCounted(false);
+            }
+            wake.acquire(24 * 3600_000L);
+        } else if (wake != null && wake.isHeld()) wake.release();
         lastNotif = 0;
+        handler.removeCallbacks(tick);
         handler.post(tick);
     }
 
     private void sample() {
-        if (live == null || battery == null) return;
+        Session s = live;
+        if (s == null || battery == null) return;
         int level = battery.getIntExtra(BatteryManager.EXTRA_LEVEL, 0);
         int scale = battery.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
-        Session.Sample s = new Session.Sample(SystemClock.elapsedRealtime() - t0,
+        int plug = plugged();
+        if (plug != 0) s.plug = plug;
+        s.chargerUv = battery.getIntExtra("max_charging_voltage", Session.MISSING);
+        s.chargerUa = battery.getIntExtra("max_charging_current", Session.MISSING);
+        s.add(new Session.Sample(SystemClock.elapsedRealtime() - t0,
                 scale > 0 ? Math.round(level * 100f / scale) : level,
                 bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW),
                 battery.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 0),
                 battery.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0),
                 bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER),
-                battery.getIntExtra(BatteryManager.EXTRA_STATUS, 0));
-        live.add(s);
-        if (out != null) {
-            try {
-                out.write(Session.line(s));
-                out.flush();
-            } catch (IOException e) {
-                out = null;
-            }
-        }
+                battery.getIntExtra(BatteryManager.EXTRA_STATUS, 0), plug != 0));
+        remember(s);
         long now = SystemClock.elapsedRealtime();
         if (now - lastNotif >= 5000) { lastNotif = now; notifyNow(); }
     }
 
-    private void end() {
-        handler.removeCallbacks(tick);
-        if (out != null) {
-            try { out.close(); } catch (IOException ignored) { /* nothing to save */ }
-            out = null;
-        }
-        if (live != null && live.size() < 3 && file != null && !file.delete()) file.deleteOnExit();
-        live = null;
-        if (wake != null && wake.isHeld()) wake.release();
-        notifyNow();
+    /** Stores a confident auto-detected unit/sign so later sessions start with it (reset in the settings). */
+    private void remember(Session s) {
+        int u = s.confidentUnit(), sg = s.confidentSign();
+        SharedPreferences.Editor e = null;
+        if (interp.storedUnit == Interp.AUTO && u != Interp.AUTO) (e = prefs.edit()).putInt(Prefs.STORED_UNIT, u);
+        if (interp.storedSign == Interp.AUTO && sg != Interp.AUTO) (e = e == null ? prefs.edit() : e).putInt(Prefs.STORED_SIGN, sg);
+        if (e != null) e.apply();
     }
 
     private void shutdown() {
-        if (live != null) end();
+        handler.removeCallbacks(tick);
         if (registered) { unregisterReceiver(receiver); registered = false; }
+        if (wake != null && wake.isHeld()) wake.release();
+        live = null;
         running = false;
         stopForeground(STOP_FOREGROUND_REMOVE);
     }
 
     @Override public void onDestroy() {
         shutdown();
+        prefs.unregisterOnSharedPreferenceChangeListener(prefsListener);
         super.onDestroy();
     }
 
@@ -187,14 +201,14 @@ public final class ChargeService extends Service {
     private Notification notification() {
         Session s = live;
         String title, text;
-        if (s == null) {
-            title = getString(R.string.notif_waiting);
-            text = getString(R.string.notif_waiting_text);
+        Session.Sample l = s == null ? null : s.last();
+        if (l == null) {
+            title = getString(R.string.app_name);
+            text = getString(R.string.notif_starting);
         } else {
-            Session.Sample l = s.last();
-            title = getString(R.string.notif_charging, l == null ? 0 : l.level, s.levelGain());
-            text = getString(R.string.notif_charging_text, Session.duration(s.elapsedMs()), Session.num(s.mah(), "%.0f"),
-                    Session.num(s.currentW(), "%.1f"));
+            title = getString(s.charge ? R.string.notif_charging : R.string.notif_discharging, l.level, s.levelGain());
+            text = getString(s.charge ? R.string.notif_charging_text : R.string.notif_discharging_text,
+                    Session.duration(s.elapsedMs()), Session.num(s.shownMah(), "%.1f"), Session.num(s.shownW(), "%.2f"));
         }
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP), PendingIntent.FLAG_IMMUTABLE);
