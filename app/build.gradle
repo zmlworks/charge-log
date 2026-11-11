@@ -1,0 +1,65 @@
+plugins { id 'com.android.application' }
+
+// Release signing: the keystore lives OUTSIDE the repo.
+// Path of a properties file (storeFile/storePassword/keyAlias/keyPassword):
+//   env ZML_KEYSTORE_PROPS, or /workspace/android/keys/keystore.properties
+def ksFile = file(System.getenv('ZML_KEYSTORE_PROPS') ?: '/workspace/android/keys/keystore.properties')
+def ks = new Properties()
+if (ksFile.exists()) ksFile.withInputStream { ks.load(it) }
+
+android {
+    namespace 'com.zmlworks.chargelog'
+    compileSdk 35
+    buildToolsVersion '35.0.0'
+    defaultConfig {
+        applicationId 'com.zmlworks.chargelog'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+    }
+    signingConfigs {
+        release {
+            if (ks['storeFile']) {
+                storeFile file(ks['storeFile'])
+                storePassword ks['storePassword']
+                keyAlias ks['keyAlias']
+                keyPassword ks['keyPassword']
+            }
+        }
+    }
+    buildTypes {
+        debug {
+            applicationIdSuffix '.debug'
+        }
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (ks['storeFile']) signingConfig signingConfigs.release
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildFeatures { buildConfig false }
+    lint {
+        abortOnError true
+        disable 'GradleDependency', 'NewerVersionAvailable', 'OldTargetApi', 'AndroidGradlePluginVersion'
+    }
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+            all { maxHeapSize = '1g' }
+        }
+    }
+    dependenciesInfo { includeInApk false; includeInBundle false }
+}
+
+dependencies {
+
+    testImplementation 'junit:junit:4.13.2'
+    // only for the JVM screen-preview test (native graphics -> PNG); not in the APK
+    testImplementation 'org.robolectric:robolectric:4.14.1'
+}
