@@ -64,6 +64,7 @@ public class SettingsActivity extends Activity {
         col.addView(forget);
 
         radios(R.string.s_interval, new String[]{"0.5秒", "1秒", "2秒", "5秒", "10秒"}, Prefs.INTERVAL, Prefs.INTERVALS);
+        radios(R.string.s_temp_interval, new String[]{"1秒", "2秒", "5秒", "10秒", "30秒"}, Prefs.TEMP_INTERVAL, Prefs.TEMP_INTERVALS);
 
         heading(R.string.s_capacity);
         EditText cap = new EditText(this);
@@ -120,7 +121,8 @@ public class SettingsActivity extends Activity {
         heading(title);
         RadioGroup g = new RadioGroup(this);
         g.setOrientation(RadioGroup.HORIZONTAL);
-        int cur = prefs.getInt(key, values == null ? 0 : 1000);
+        int fallback = values == null ? 0 : defaultValue(key, values);
+        int cur = prefs.getInt(key, fallback);
         for (int i = 0; i < labels.length; i++) {
             RadioButton rb = new RadioButton(this);
             rb.setText(labels[i]);
@@ -135,6 +137,11 @@ public class SettingsActivity extends Activity {
             updateRaw();
         });
         col.addView(g);
+    }
+
+    private static int defaultValue(String key, int[] values) {
+        if (Prefs.TEMP_INTERVAL.equals(key)) return 5000;
+        return values.length > 1 ? values[1] : values[0];   // record interval default 1 s (index 1)
     }
 
     private void updateRaw() {

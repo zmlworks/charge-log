@@ -42,6 +42,7 @@ public final class ChargeService extends Service {
     private Intent battery;
     private long t0, lastNotif;
     private boolean registered;
+    private final Thermals.Probe probe = new Thermals.Probe();
 
     static void start(Context c) { c.startForegroundService(new Intent(c, ChargeService.class)); }
 
@@ -68,6 +69,13 @@ public final class ChargeService extends Service {
         }
     };
 
+    private final Runnable tempTick = new Runnable() {
+        @Override public void run() {
+            sampleTemps();
+            handler.postDelayed(this, Prefs.tempIntervalMs(ChargeService.this));
+        }
+    };
+
     @Override public IBinder onBind(Intent i) { return null; }
 
     @Override public void onCreate() {
@@ -77,6 +85,7 @@ public final class ChargeService extends Service {
         prefs = Prefs.sp(this);
         interp = Prefs.interp(this);
         prefs.registerOnSharedPreferenceChangeListener(prefsListener);
+        probe.start(this);
         NotificationChannel ch = new NotificationChannel(CHANNEL, getString(R.string.channel), NotificationManager.IMPORTANCE_LOW);
         ch.setShowBadge(false);
         nm.createNotificationChannel(ch);
@@ -146,7 +155,15 @@ public final class ChargeService extends Service {
         } else if (wake != null && wake.isHeld()) wake.release();
         lastNotif = 0;
         handler.removeCallbacks(tick);
+        handler.removeCallbacks(tempTick);
         handler.post(tick);
+        handler.post(tempTick);
+    }
+
+    private void sampleTemps() {
+        Session s = live;
+        if (s == null) return;
+        s.addTemps(SystemClock.elapsedRealtime() - t0, Thermals.read(this, probe).all);
     }
 
     private void sample() {
@@ -181,6 +198,7 @@ public final class ChargeService extends Service {
 
     private void shutdown() {
         handler.removeCallbacks(tick);
+        handler.removeCallbacks(tempTick);
         if (registered) { unregisterReceiver(receiver); registered = false; }
         if (wake != null && wake.isHeld()) wake.release();
         live = null;
@@ -190,6 +208,7 @@ public final class ChargeService extends Service {
 
     @Override public void onDestroy() {
         shutdown();
+        probe.stop();
         prefs.unregisterOnSharedPreferenceChangeListener(prefsListener);
         super.onDestroy();
     }

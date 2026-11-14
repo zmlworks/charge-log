@@ -145,5 +145,11 @@ public class SessionTest {
         assertEquals(900_000, GraphView.timeStepMs(90 * 60_000L));
         assertEquals("1:30", GraphView.timeLabel(90 * 60_000L, 900_000));
         assertEquals("0:45", GraphView.timeLabel(45_000, 15_000));
+        float[] r = GraphView.niceRange(32f, 44f);
+        assertTrue(r[0] <= 32f && r[1] >= 44f);
+        assertTrue(r[1] - r[0] >= 5f);
+        float[] flat = GraphView.niceRange(30f, 30f);
+        assertTrue(flat[1] - flat[0] >= 5f);
+        assertTrue(flat[0] <= 30f && flat[1] >= 30f);
     }
 }

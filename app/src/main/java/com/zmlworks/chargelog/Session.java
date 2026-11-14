@@ -42,12 +42,27 @@ final class Session {
         }
     }
 
+    /** One temperature sweep, taken on the temperature interval (independent of current/voltage samples). */
+    static final class TempSample {
+        final long t;
+        final String[] ids, names;
+        final int[] milliC;
+        final int maxMilliC;
+        final Thermals.Reading[] extras;   // non-°C (thermal status / headroom), latest-wins when displaying
+
+        TempSample(long t, String[] ids, String[] names, int[] milliC, int maxMilliC, Thermals.Reading[] extras) {
+            this.t = t; this.ids = ids; this.names = names; this.milliC = milliC;
+            this.maxMilliC = maxMilliC; this.extras = extras;
+        }
+    }
+
     final long start;       // wall clock ms
     final boolean charge;
     final int dir;          // +1 charge, -1 discharge (for the shown values)
     int plug;               // BatteryManager.BATTERY_PLUGGED_*
     int chargerUv = MISSING, chargerUa = MISSING;   // max_charging_voltage / max_charging_current extras
     final ArrayList<Sample> samples = new ArrayList<>();
+    final ArrayList<TempSample> temps = new ArrayList<>();
 
     private Interp interp;
     // auto-detection evidence (raw, independent of the interpretation)
@@ -90,6 +105,33 @@ final class Session {
         }
         if (decide() | firstCurrent) rebuild(); else step(n - 1);
     }
+
+    void addTemps(long t, Thermals.Reading[] readings) {
+        if (readings == null) return;
+        int n = 0, nEx = 0;
+        for (Thermals.Reading r : readings) {
+            if (r.isTemp()) n++;
+            else if (r.text != null) nEx++;
+        }
+        if (n == 0 && nEx == 0) return;
+        String[] ids = new String[n], names = new String[n];
+        int[] v = new int[n];
+        Thermals.Reading[] extras = nEx == 0 ? null : new Thermals.Reading[nEx];
+        int max = MISSING, j = 0, k = 0;
+        for (Thermals.Reading r : readings) {
+            if (r.isTemp()) {
+                ids[j] = r.id; names[j] = r.name; v[j] = r.milliC;
+                if (max == MISSING || r.milliC > max) max = r.milliC;
+                j++;
+            } else if (r.text != null) extras[k++] = r;
+        }
+        temps.add(new TempSample(t, ids, names, v, max, extras));
+    }
+
+    int tempSize() { return temps.size(); }
+    TempSample lastTemps() { return temps.isEmpty() ? null : temps.get(temps.size() - 1); }
+    int maxMilliCAt(int i) { return temps.get(i).maxMilliC; }
+    long tempT(int i) { return temps.get(i).t; }
 
     void setInterp(Interp i) {
         interp = i;

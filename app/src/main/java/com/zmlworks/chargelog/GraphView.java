@@ -17,7 +17,8 @@ import java.util.Locale;
  * is at the latest sample the view follows new samples.
  */
 final class GraphView extends View {
-    static final int C_LEVEL = 0xFF4FB3FF, C_MAH = 0xFFF2B33D, C_POWER = 0xFFFF6B5B, C_CURRENT = 0xFF7BD88F;
+    static final int C_LEVEL = 0xFF4FB3FF, C_MAH = 0xFFF2B33D, C_POWER = 0xFFFF6B5B, C_CURRENT = 0xFF7BD88F,
+            C_TEMP = 0xFFD28BFF;
 
     private Session session;
     private float zoom = 1;      // 1 = whole session
@@ -115,6 +116,11 @@ final class GraphView extends View {
         panel(c, s, top, top + ph, t0, sp, 100, "%", mahMax, "mAh",
                 ctx.getString(R.string.legend_level), C_LEVEL, (ss, i) -> ss.samples.get(i).level,
                 ctx.getString(s.charge ? R.string.legend_mah : R.string.legend_used), C_MAH, Session::shownAccAt);
+        // Highest temperature across sensors is a slow session-long trend, like level / mAh,
+        // so it is overlaid here (own scale, range in the centre legend) rather than on the
+        // noisier power / current panel where a nearly-flat line would be hard to read.
+        float[] tr = tempRange(s);
+        if (tr != null) tempCurve(c, s, top, top + ph, t0, sp, tr[0], tr[1], ctx);
         float wMax = nice(maxOf(s, Session::shownWAt));
         float aMax = nice(maxOf(s, Session::shownAAt));
         panel(c, s, top + ph + gap, bottom, t0, sp, wMax, "W", aMax, "A",
@@ -201,6 +207,84 @@ final class GraphView extends View {
         int lo = 0, hi = s.size();
         while (lo < hi) { int m = (lo + hi) >>> 1; if (s.samples.get(m).t < t) lo = m + 1; else hi = m; }
         return lo;
+    }
+
+    private void tempCurve(Canvas c, Session s, float t, float b, double t0, double sp, float lo, float hi, Context ctx) {
+        float range = hi - lo;
+        if (range <= 0) return;
+        text.setTextAlign(Paint.Align.CENTER);
+        text.setColor(C_TEMP);
+        String label = ctx.getString(R.string.legend_max_temp) + String.format(java.util.Locale.ROOT, "  %.0f–%.0f℃", lo, hi);
+        c.drawText(label, (l + r) / 2f, t - 7 * dp, text);
+        int n = s.tempSize();
+        if (n < 1) return;
+        // Same point budget as the other series: one vertex per ~2 dp, averaged in buckets.
+        int loI = 0, hiI = n;
+        while (loI < n && s.tempT(loI) < t0) loI++;
+        loI = Math.max(0, loI - 1);
+        while (hiI > loI && s.tempT(hiI - 1) > t0 + sp) hiI--;
+        hiI = Math.min(n, hiI + 1);
+        int count = hiI - loI;
+        if (count < 1) return;
+        int pts = Math.max(1, Math.min(count, (int) ((r - l) / (2 * dp))));
+        Path p = new Path();
+        boolean started = false;
+        c.save();
+        c.clipRect(l, t - 2 * dp, r, b + 2 * dp);
+        for (int k = 0; k < pts; k++) {
+            int i0 = loI + (int) ((long) count * k / pts), i1 = Math.max(i0 + 1, loI + (int) ((long) count * (k + 1) / pts));
+            double sum = 0;
+            int cnt = 0;
+            long midT = 0;
+            for (int i = i0; i < i1; i++) {
+                int m = s.maxMilliCAt(i);
+                if (m == Session.MISSING) continue;
+                sum += m / 1000.0;
+                midT += s.tempT(i);
+                cnt++;
+            }
+            if (cnt == 0) continue;
+            float x = (float) (l + (r - l) * ((midT / (double) cnt - t0) / sp));
+            float v = (float) Math.max(lo, Math.min(hi, sum / cnt));
+            float y = b - (b - t) * (v - lo) / range;
+            if (!started) { p.moveTo(x, y); started = true; } else p.lineTo(x, y);
+        }
+        if (started) {
+            line.setColor(C_TEMP);
+            c.drawPath(p, line);
+        }
+        c.restore();
+    }
+
+    /** Vertical range for the max-temperature overlay: tight around the data, at least 5 ℃. */
+    static float[] tempRange(Session s) {
+        if (s == null) return null;
+        float lo = Float.POSITIVE_INFINITY, hi = Float.NEGATIVE_INFINITY;
+        for (int i = 0; i < s.tempSize(); i++) {
+            int m = s.maxMilliCAt(i);
+            if (m == Session.MISSING) continue;
+            float v = m / 1000f;
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+        if (!(hi >= lo) || lo == Float.POSITIVE_INFINITY) return null;
+        return niceRange(lo, hi);
+    }
+
+    /** Padded range with half-degree ends and a span of at least 5 ℃. */
+    static float[] niceRange(float lo, float hi) {
+        if (hi - lo < 5f) {
+            float mid = (lo + hi) / 2f;
+            lo = mid - 2.5f;
+            hi = mid + 2.5f;
+        }
+        float pad = Math.max(0.5f, (hi - lo) * 0.1f);
+        lo -= pad;
+        hi += pad;
+        lo = (float) (Math.floor(lo * 2) / 2);
+        hi = (float) (Math.ceil(hi * 2) / 2);
+        if (hi - lo < 5f) hi = lo + 5f;
+        return new float[]{lo, hi};
     }
 
     static float maxOf(Session s, Series ser) {

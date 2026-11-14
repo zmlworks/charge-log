@@ -8,9 +8,13 @@
 
 > このアプリは AI アシスタント **Grok Bot** が設計・実装しました (zmlworks の依頼による)。
 
-| 充電中 | 充電中 (数値) | 放電中 | 設定 |
-|---|---|---|---|
-| ![充電中](docs/main-charging.png) | ![数値](docs/main-charging-numbers.png) | ![放電中](docs/main-discharging.png) | ![設定](docs/settings.png) |
+| 充電中 | 充電中 (数値) | 充電中 (温度センサー) |
+|---|---|---|
+| ![充電中](docs/main-charging.png) | ![数値](docs/main-charging-numbers.png) | ![温度](docs/main-charging-temps.png) |
+
+| 放電中 | 設定 | 通知アイコン |
+|---|---|---|
+| ![放電中](docs/main-discharging.png) | ![設定](docs/settings.png) | ![通知](docs/notif-icon.png) |
 
 (画像は **架空のサンプルデータ** を Robolectric で JVM 上に描画したものです。実機のスクリーンショットではありません。)
 
@@ -22,13 +26,22 @@
     「放電記録を表示」「充電結果を表示」で切り替え。充電結果は、次に充電を始めるか「リセット」するまで残ります。
 - 「リセット」: いまの記録を捨てて最初から記録し直します (充電結果も消えます)。
 - 「記録を停止」/通知の「停止」で常駐をやめます。メモリ上の記録は、アプリのプロセスが終わると消えます。
-- グラフ (画面上部): 上が残量 % と積算 mAh (充電量／使用量)、下が電力 W と電流 A (放電中は放電電力・放電電流を正の値で表示)。
+- ボタン（充電結果／放電記録の切替、リセット、設定、記録の開始／停止）は画面上部、グラフの上にあります。
+- グラフ (その下): 上が残量 % と積算 mAh (充電量／使用量)、下が電力 W と電流 A (放電中は放電電力・放電電流を正の値で表示)。
+  上のグラフには、取得できた全温度センサーのうち **その時点で最も高い温度** の推移を紫の線で重ねます
+  (どちらもセッション全体のゆるやかな変化なので、同じ段の方が見比べやすいです。下のグラフは電力と電流が細かく動くので、温度の線が埋もれやすいです)。
+  温度の目盛りは中央の凡例に範囲 (例: 25–45℃) として出します。
   最初は記録全体を表示し、新しいサンプルに追従します。**ピンチで拡大、横ドラッグでスクロール、ダブルタップで全体表示** に戻ります。
 
 ### 表示する項目
 状態、開始時刻、経過時間、ログ回数、残量 (開始→現在、差)、充電量／使用量 (mAh、小数1桁)、電力量／使用電力量 (Wh、小数3桁)、
-平均電力・最新の電力・最大瞬間電力 (W、小数2桁)、最新の電流 (A、小数3桁)、電圧 (V、小数3桁)、温度、
+平均電力・最新の電力・最大瞬間電力 (W、小数2桁)、最新の電流 (A、小数3桁)、電圧 (V、小数3桁)、**バッテリー温度**、
 **電圧種類**、**推定容量**、`CHARGE_COUNTER` の差 (参考)。
+
+画面の一番下に、読めた温度センサーを **開始時からの変化が大きい順** に並べます (現在値と差)。
+途中まで常に同じ数値 (表示の 0.1℃ まで一致) だったセンサーは、名前を「cpu-0 / cpu-1」のようにまとめて1行にします。
+まったく動かなかったセンサーは下に行きます。バッテリー温度は従来どおり数値の欄にも残します。
+`PowerManager` の熱状態・熱ヘッドルームは温度ではないので、その下の「熱状態」に分けて出します。
 
 - **電圧種類**: 接続の種類 (AC / USB / ワイヤレス / ドック) に、`ACTION_BATTERY_CHANGED` の非公開 extra
   `max_charging_voltage` (µV) / `max_charging_current` (µA) を足したもの。例: `AC 9.0V 2.00A (急速・高電圧)`。
@@ -44,7 +57,8 @@
   変えると、記録中のデータも生の値から計算し直します。
 - **自動判定で記憶した値**: 自動判定が確実に決まったら記憶し、次の記録からはそれを使います (電流が小さいときの誤判定を防ぐため)。
   「記憶をリセット」で消せます。手動の設定 (mA / µA など) があればそちらが優先です。
-- **記録間隔**: 0.5 / 1 / 2 / 5 / 10 秒。
+- **記録間隔**: 電流・電圧・残量などの間隔。0.5 / 1 / 2 / 5 / 10 秒。
+- **温度の取得間隔**: 温度センサーだけ別の間隔にできます。1 / 2 / 5 / 10 / 30 秒 (初期値 5 秒)。
 - **公称バッテリー容量** (mAh): 推定容量との比較用。
 
 ## 計算のしかた
@@ -61,6 +75,16 @@
   充電中だけは WAKE_LOCK で 1 秒ごとの記録を続けます。
 - 電流が取れない機種では、mAh に `CHARGE_COUNTER` の差を使います (Wh は「—」)。
 
+## 温度センサー
+root や非公開 API (`HardwarePropertiesManager` は特権が必要なので使いません) に頼らず、次を読みます。読めないものは飛ばします。どのゾーンが読めるかは機種と SELinux の方針しだいです。
+
+- `BatteryManager.EXTRA_TEMPERATURE` (従来の「温度」。数値欄では「バッテリー温度」)
+- `/sys/class/thermal/thermal_zone*/type` と `temp` (カーネルの thermal sysfs。単位はミリ℃)
+- `/sys/class/hwmon/*/temp*_input` と `temp*_label` (同じくミリ℃)
+- `/sys/class/power_supply/*/temp` (十分の1℃。バッテリーと二重になることがあり、そのときはまとまります)
+- `SensorManager` の周囲温度 (`TYPE_AMBIENT_TEMPERATURE`) と旧 `TYPE_TEMPERATURE` (ある機種だけ)
+- `PowerManager.getCurrentThermalStatus()` と `getThermalHeadroom()` (℃ではないので一覧の「熱状態」へ)
+
 ## 権限
 | 権限 | 理由 |
 |---|---|
@@ -76,16 +100,22 @@ INTERNET とストレージ関係の権限は使いません。端末起動時�
 ```
 release 署名用 keystore はリポジトリ外 (`ZML_KEYSTORE_PROPS` または `/workspace/android/keys/keystore.properties`)。
 テスト: 単位・符号の判定と記憶、設定による計算し直し、スリープ中の CHARGE_COUNTER 補完、放電の表示、推定容量、
-電圧種類の表示 (`SessionTest`)、画面の描画 (`ScreenshotsTest`, Robolectric。上の画像)。
+電圧種類の表示 (`SessionTest`)、温度の sysfs 読み取りと同一値のまとめ・並べ替え (`ThermalsTest`)、
+画面の描画と通知アイコンが単色のシルエットであること (`ScreenshotsTest`, Robolectric。上の画像)。
 
 ## 既知の制限 / Known limitations
 - `CURRENT_NOW` の精度は機種しだいです (更新が遅い、平均値しか返さない、0 や固定値を返す機種があります)。
 - 記録はメモリ上だけなので、アプリのプロセスが終了すると消えます (省電力機能による強制終了を含む)。
 - 放電の記録中に画面オフで長く止まり、`CHARGE_COUNTER` もない機種では、使用量が不正確になります。
 - `max_charging_voltage/current` は Android の非公開 extra で、ない機種や実際と違う値を返す機種があります。
+- 温度ゾーンや hwmon が読めるかは機種しだいです (SELinux で一部だけ読める、どれも読めない、同じ値が何個も出る、など)。実機での確認はまだです。
+- `getThermalHeadroom` は、初回や非対応の機種では値が取れないことがあります。
 - 再起動後は自動で記録しません。
 
 ## 更新履歴
+- **0.3.0**: 読める温度センサーを集め、同じ数値のものはまとめて、開始時からの変化が大きい順に画面下部へ。従来の「温度」は「バッテリー温度」として同じ位置に残す。
+  全センサーのうち最も高い温度の推移を、上のグラフ (残量・充電量) に紫の線で追加。温度の取得間隔を設定に追加 (初期値5秒)。
+  ボタンを画面上部へ。通知アイコンを、システムの充電通知（バッテリーに雷）と紛らわしくないよう、中に小さな折れ線グラフがあるバッテリーの輪郭に変更。
 - **0.2.0**: 記録をメモリ上だけにし、履歴とファイル保存を廃止 (0.1.0 が保存したファイルは起動時に削除)。放電の記録を追加 (充電が始まったら破棄して充電の記録に切替)。
   設定 (生の値の表示、単位・符号の解釈、自動判定の記憶、記録間隔、公称容量)。濃いグレーの配色。グラフを上部に移し拡大・スクロール対応。
   ログ回数・最大瞬間電力・電圧種類・推定容量を追加し、数値を小数まで表示。
@@ -96,10 +126,14 @@ release 署名用 keystore はリポジトリ外 (`ZML_KEYSTORE_PROPS` または
 ## English summary
 Records the battery in memory only (no files, no internet). After launch it logs a discharge session; plugging in
 discards it and starts a charge session; unplugging keeps the finished charge result on screen while a new discharge
-session runs in the background. Graphs (level + accumulated mAh, power + current) on top with pinch zoom / horizontal
-scroll / double-tap fit. Settings show raw CURRENT_NOW / voltage / CHARGE_COUNTER readings and let you fix the current
-unit, sign and voltage unit; confident auto-detections are remembered. Also: record interval, nominal capacity,
-estimated capacity, max power, charger type from the max_charging_voltage/current extras.
+session runs in the background. Buttons sit at the top; graphs (level + accumulated mAh, with the highest temperature
+across sensors overlaid; power + current) below, with pinch zoom / horizontal scroll / double-tap fit. Every readable
+temperature source (thermal zones, hwmon, power_supply, BatteryManager, ambient sensors, plus PowerManager status /
+headroom) is listed at the bottom, grouped when values always agree and sorted by change since the session started.
+The previous "temperature" field is labelled battery temperature and stays in the numbers grid. Temperature can be
+sampled on its own interval (default 5 s). Settings show raw CURRENT_NOW / voltage / CHARGE_COUNTER readings and let
+you fix the current unit, sign and voltage unit; confident auto-detections are remembered. Also: record interval,
+nominal capacity, estimated capacity, max power, charger type from the max_charging_voltage/current extras.
 
 ## ライセンス
 MIT © 2026 zmlworks — [LICENSE](LICENSE)。APK にサードパーティのライブラリは入っていません (JUnit・Robolectric はテスト専用)。

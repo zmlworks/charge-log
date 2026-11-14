@@ -8,20 +8,21 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
-/** Starts the service on launch; graph on top, numbers below, refreshed twice a second. */
+/** Starts the service on launch; buttons and status at the top, graph, then numbers and sensors. */
 public class MainActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private TextView status;
-    private Button toggle, view, reset;
+    private Button toggle, view, reset, settings;
+    private LinearLayout row1, row2;
     private GraphView graph;
     private SessionView stats;
+    private SensorView sensors;
     private Session lastFinished;
     private boolean showFinished;
 
@@ -39,18 +40,35 @@ public class MainActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(pad, pad / 2, pad, 0);
 
-        LinearLayout bar = new LinearLayout(this);
-        bar.setGravity(Gravity.CENTER_VERTICAL);
         TextView title = new TextView(this);
         title.setText(R.string.app_name);
         title.setTextSize(20);
         title.setTextColor(Ui.TEXT);
-        bar.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        Button settings = new Button(this);
+        title.setPadding(0, 0, 0, pad / 4);
+        root.addView(title);
+
+        row1 = new LinearLayout(this);
+        row2 = new LinearLayout(this);
+        view = button(row1, v -> { showFinished = !showFinished; update(); });
+        reset = button(row1, v -> { ChargeService.send(this, ChargeService.ACTION_RESET); handler.postDelayed(this::update, 300); });
+        reset.setText(R.string.reset);
+        settings = button(row2, v -> startActivity(new Intent(this, SettingsActivity.class)));
         settings.setText(R.string.settings);
-        settings.setOnClickListener(v -> startActivity(new Intent(this, SettingsActivity.class)));
-        bar.addView(settings);
-        root.addView(bar);
+        toggle = button(row2, v -> {
+            if (ChargeService.running) ChargeService.send(this, ChargeService.ACTION_STOP); else ChargeService.start(this);
+            handler.postDelayed(this::update, 300);
+        });
+        LinearLayout.LayoutParams rowLp1 = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        rowLp1.topMargin = pad / 4;
+        LinearLayout.LayoutParams rowLp2 = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        rowLp2.topMargin = pad / 4;
+        root.addView(row1, rowLp1);
+        root.addView(row2, rowLp2);
+
+        status = new TextView(this);
+        status.setTextSize(14);
+        status.setPadding(0, pad / 2, 0, pad / 2);
+        root.addView(status);
 
         graph = new GraphView(this);
         root.addView(graph, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, Ui.dp(this, 360)));
@@ -58,23 +76,14 @@ public class MainActivity extends Activity {
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
         col.setPadding(0, 0, 0, pad * 4);
-        status = new TextView(this);
-        status.setTextSize(14);
-        status.setPadding(0, pad / 2, 0, pad / 2);
-        col.addView(status);
-        LinearLayout buttons = new LinearLayout(this);
-        toggle = button(buttons, v -> {
-            if (ChargeService.running) ChargeService.send(this, ChargeService.ACTION_STOP); else ChargeService.start(this);
-            handler.postDelayed(this::update, 300);
-        });
-        view = button(buttons, v -> { showFinished = !showFinished; update(); });
-        reset = button(buttons, v -> { ChargeService.send(this, ChargeService.ACTION_RESET); handler.postDelayed(this::update, 300); });
-        reset.setText(R.string.reset);
-        col.addView(buttons);
         stats = new SessionView(this);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         lp.topMargin = pad / 2;
         col.addView(stats, lp);
+        sensors = new SensorView(this);
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        slp.topMargin = pad;
+        col.addView(sensors, slp);
         ScrollView sv = new ScrollView(this);
         sv.addView(col);
         root.addView(sv, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1));
@@ -118,8 +127,17 @@ public class MainActivity extends Activity {
         graph.setSession(s);
         stats.show(s, showFinished, Prefs.capacity(this));
         toggle.setText(ChargeService.running ? R.string.stop_service : R.string.start_service);
-        view.setVisibility(fin != null ? View.VISIBLE : View.GONE);
         view.setText(showFinished ? R.string.view_live : R.string.view_finished);
         reset.setEnabled(ChargeService.running);
+        // When a finished charge exists, row1 is 充電結果/放電記録 + リセット; otherwise only row2 (リセット is moved there).
+        if (fin != null) {
+            if (view.getParent() != row1) { row2.removeView(view); row1.addView(view, 0); }
+            if (reset.getParent() != row1) { row2.removeView(reset); row1.addView(reset); }
+            row1.setVisibility(View.VISIBLE);
+        } else {
+            row1.setVisibility(View.GONE);
+            if (reset.getParent() != row2) { row1.removeView(reset); row2.addView(reset, 0); }
+        }
+        sensors.show(s);
     }
 }
