@@ -19,18 +19,17 @@
 (画像は **架空のサンプルデータ** を Robolectric で JVM 上に描画したものです。実機のスクリーンショットではありません。)
 
 ## 使い方
-- 起動するとすぐ記録を始めます (常駐サービス、通知に「停止」ボタン)。
+- 起動するとすぐ記録を始めます。起動しているあいだは記録を止めません (常駐サービス)。
   - 充電器につながっていなければ **放電の記録**。
   - 充電器をつなぐと、それまでの放電の記録は **捨てて** 充電の記録に切り替えます。
   - 充電器を外すと、その充電の結果を **メモリに残したまま画面に表示** し、裏では新しい放電の記録を始めます。
     「放電記録を表示」「充電結果を表示」で切り替え。充電結果は、次に充電を始めるか「リセット」するまで残ります。
 - 「リセット」: いまの記録を捨てて最初から記録し直します (充電結果も消えます)。
-- 「記録を停止」/通知の「停止」で常駐をやめます。メモリ上の記録は、アプリのプロセスが終わると消えます。
-- ボタン（充電結果／放電記録の切替、リセット、設定、記録の開始／停止）は画面上部、グラフの上にあります。
+- 画面上部または通知の「閉じる」で、記録を止め、通知を消し、アプリを終了します。メモリ上の記録は、プロセスが終わると消えます。
+- ボタン（充電結果／放電記録の切替、リセット、設定、閉じる）は画面上部、グラフの上にあります。
 - グラフ (その下): 上が残量 % と積算 mAh (充電量／使用量)、下が電力 W と電流 A (放電中は放電電力・放電電流を正の値で表示)。
-  上のグラフには、取得できた全温度センサーのうち **その時点で最も高い温度** の推移を紫の線で重ねます
-  (どちらもセッション全体のゆるやかな変化なので、同じ段の方が見比べやすいです。下のグラフは電力と電流が細かく動くので、温度の線が埋もれやすいです)。
-  温度の目盛りは中央の凡例に範囲 (例: 25–45℃) として出します。
+  下のグラフには、取得できた全温度センサーのうち **その時点で最も高い温度** の推移を紫の線で重ねます
+  (温度の目盛りは中央の凡例に範囲 (例: 25–45℃) として出します。電力・電流とは別軸なので、線が埋もれても値が読めます)。
   最初は記録全体を表示し、新しいサンプルに追従します。**ピンチで拡大、横ドラッグでスクロール、ダブルタップで全体表示** に戻ります。
 
 ### 表示する項目
@@ -70,9 +69,9 @@
   記憶するのは、充電器なしのサンプルが30回以上あり、その9割以上が同じ符号だったとき。
 - **電圧 (自動)**: 100 未満は V、100000 超は µV、それ以外は mV とみなします。
 - mAh = 電流の台形積分、Wh = 電圧 × 電流 の台形積分 (電池側の値)。
-- 放電中は CPU を起こし続けない (電池を余計に使わない) ため、画面オフで記録が止まることがあります。
+- 起動中は充電・放電どちらでも WAKE_LOCK を保持し、画面オフでも記録を止めません。
   サンプルの間が 15 秒を超えたときは、その間を `CHARGE_COUNTER` の差で埋めます (非対応の機種では前後の電流から補間)。
-  充電中だけは WAKE_LOCK で 1 秒ごとの記録を続けます。
+  放電の記録には、起こし続けた CPU 分の消費も含まれます。
 - 電流が取れない機種では、mAh に `CHARGE_COUNTER` の差を使います (Wh は「—」)。
 
 ## 温度センサー
@@ -89,8 +88,8 @@ root や非公開 API (`HardwarePropertiesManager` は特権が必要なので�
 | 権限 | 理由 |
 |---|---|
 | FOREGROUND_SERVICE, FOREGROUND_SERVICE_SPECIAL_USE | 画面を閉じても記録を続けるため (type=specialUse。Android 15 の dataSync の6時間制限を避けるため) |
-| POST_NOTIFICATIONS (13+) | 常駐通知と「停止」ボタン (拒否しても記録は動きます) |
-| WAKE_LOCK | 画面オフでも記録を続けるため。**充電中だけ** 保持します |
+| POST_NOTIFICATIONS (13+) | 常駐通知と「閉じる」ボタン (拒否しても記録は動きます) |
+| WAKE_LOCK | 画面オフでも記録を続けるため。起動中は充電・放電どちらでも保持します |
 
 INTERNET とストレージ関係の権限は使いません。端末起動時の自動開始もしません。
 
@@ -101,18 +100,21 @@ INTERNET とストレージ関係の権限は使いません。端末起動時�
 release 署名用 keystore はリポジトリ外 (`ZML_KEYSTORE_PROPS` または `/workspace/android/keys/keystore.properties`)。
 テスト: 単位・符号の判定と記憶、設定による計算し直し、スリープ中の CHARGE_COUNTER 補完、放電の表示、推定容量、
 電圧種類の表示 (`SessionTest`)、温度の sysfs 読み取りと同一値のまとめ・並べ替え (`ThermalsTest`)、
-画面の描画と通知アイコンが単色のシルエットであること (`ScreenshotsTest`, Robolectric。上の画像)。
+画面の描画と通知アイコンが単色のシルエットであること (`ScreenshotsTest`, Robolectric。上の画像)、
+最高温度の線が下のグラフにあること (`GraphViewTest`)、閉じる操作で記録と通知が止まること (`ChargeServiceTest`)。
 
 ## 既知の制限 / Known limitations
 - `CURRENT_NOW` の精度は機種しだいです (更新が遅い、平均値しか返さない、0 や固定値を返す機種があります)。
 - 記録はメモリ上だけなので、アプリのプロセスが終了すると消えます (省電力機能による強制終了を含む)。
-- 放電の記録中に画面オフで長く止まり、`CHARGE_COUNTER` もない機種では、使用量が不正確になります。
+- 放電中も CPU を起こし続けるため、記録していること自体の消費が使用量に乗ります。
 - `max_charging_voltage/current` は Android の非公開 extra で、ない機種や実際と違う値を返す機種があります。
 - 温度ゾーンや hwmon が読めるかは機種しだいです (SELinux で一部だけ読める、どれも読めない、同じ値が何個も出る、など)。実機での確認はまだです。
 - `getThermalHeadroom` は、初回や非対応の機種では値が取れないことがあります。
 - 再起動後は自動で記録しません。
 
 ## 更新履歴
+- **0.3.1**: 最高温度の推移を下のグラフ（電力・電流）へ移す。起動中は記録を止めない（放電中も WAKE_LOCK を保持。「記録を停止」ボタンは廃止）。
+  「閉じる」（画面と通知）で常駐サービス・通知・画面をまとめて終了する。
 - **0.3.0**: 読める温度センサーを集め、同じ数値のものはまとめて、開始時からの変化が大きい順に画面下部へ。従来の「温度」は「バッテリー温度」として同じ位置に残す。
   全センサーのうち最も高い温度の推移を、上のグラフ (残量・充電量) に紫の線で追加。温度の取得間隔を設定に追加 (初期値5秒)。
   ボタンを画面上部へ。通知アイコンを、システムの充電通知（バッテリーに雷）と紛らわしくないよう、中に小さな折れ線グラフがあるバッテリーの輪郭に変更。
@@ -126,8 +128,11 @@ release 署名用 keystore はリポジトリ外 (`ZML_KEYSTORE_PROPS` または
 ## English summary
 Records the battery in memory only (no files, no internet). After launch it logs a discharge session; plugging in
 discards it and starts a charge session; unplugging keeps the finished charge result on screen while a new discharge
-session runs in the background. Buttons sit at the top; graphs (level + accumulated mAh, with the highest temperature
-across sensors overlaid; power + current) below, with pinch zoom / horizontal scroll / double-tap fit. Every readable
+session runs in the background. Recording continues for as long as the app is running (a partial wake lock is held
+while charging or discharging). The Close button on the screen or in the notification stops the service, removes the
+notification and finishes the app. Buttons sit at the top; graphs (level + accumulated mAh; power + current, with the
+highest temperature across sensors overlaid on its own scale) below, with pinch zoom / horizontal scroll / double-tap
+fit. Every readable
 temperature source (thermal zones, hwmon, power_supply, BatteryManager, ambient sensors, plus PowerManager status /
 headroom) is listed at the bottom, grouped when values always agree and sorted by change since the session started.
 The previous "temperature" field is labelled battery temperature and stays in the numbers grid. Temperature can be

@@ -16,9 +16,13 @@ import android.widget.TextView;
 
 /** Starts the service on launch; buttons and status at the top, graph, then numbers and sensors. */
 public class MainActivity extends Activity {
+    static final String ACTION_QUIT = "com.zmlworks.chargelog.QUIT";
+    /** Tests set this false so Robolectric is not killed. On a device, close also exits the process. */
+    static boolean exitProcessOnQuit = true;
+
     private final Handler handler = new Handler(Looper.getMainLooper());
     private TextView status;
-    private Button toggle, view, reset, settings;
+    private Button close, view, reset, settings;
     private LinearLayout row1, row2;
     private GraphView graph;
     private SessionView stats;
@@ -35,6 +39,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
+        if (isQuit(getIntent())) { quit(); return; }
         int pad = Ui.dp(this, 12);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -54,10 +59,8 @@ public class MainActivity extends Activity {
         reset.setText(R.string.reset);
         settings = button(row2, v -> startActivity(new Intent(this, SettingsActivity.class)));
         settings.setText(R.string.settings);
-        toggle = button(row2, v -> {
-            if (ChargeService.running) ChargeService.send(this, ChargeService.ACTION_STOP); else ChargeService.start(this);
-            handler.postDelayed(this::update, 300);
-        });
+        close = button(row2, v -> quit());
+        close.setText(R.string.close);
         LinearLayout.LayoutParams rowLp1 = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         rowLp1.topMargin = pad / 4;
         LinearLayout.LayoutParams rowLp2 = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
@@ -96,6 +99,26 @@ public class MainActivity extends Activity {
         if (b == null) ChargeService.start(this);
     }
 
+    @Override protected void onNewIntent(Intent i) {
+        super.onNewIntent(i);
+        setIntent(i);
+        if (isQuit(i)) quit();
+    }
+
+    private static boolean isQuit(Intent i) {
+        return i != null && ACTION_QUIT.equals(i.getAction());
+    }
+
+    /** Stop the service, drop the notification, finish every activity, and leave no process behind. */
+    void quit() {
+        ChargeService.quit(this);
+        finishAffinity();
+        finishAndRemoveTask();
+        if (exitProcessOnQuit && !"robolectric".equals(android.os.Build.FINGERPRINT)) {
+            handler.postDelayed(() -> android.os.Process.killProcess(android.os.Process.myPid()), 200);
+        }
+    }
+
     private Button button(LinearLayout row, View.OnClickListener l) {
         Button b = new Button(this);
         b.setOnClickListener(l);
@@ -107,6 +130,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        if (status == null) return;   // ACTION_QUIT path never built the UI
         handler.post(refresh);
     }
 
@@ -116,6 +140,7 @@ public class MainActivity extends Activity {
     }
 
     void update() {
+        if (status == null) return;
         Session live = ChargeService.live, fin = ChargeService.finished;
         if (fin != lastFinished) { lastFinished = fin; showFinished = fin != null; }   // a charge just ended: show it
         if (fin == null) showFinished = false;
@@ -126,7 +151,6 @@ public class MainActivity extends Activity {
         else status.setText(live.charge ? R.string.status_charging : R.string.status_discharging);
         graph.setSession(s);
         stats.show(s, showFinished, Prefs.capacity(this));
-        toggle.setText(ChargeService.running ? R.string.stop_service : R.string.start_service);
         view.setText(showFinished ? R.string.view_live : R.string.view_finished);
         reset.setEnabled(ChargeService.running);
         // When a finished charge exists, row1 is 充電結果/放電記録 + リセット; otherwise only row2 (リセット is moved there).

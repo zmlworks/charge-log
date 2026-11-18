@@ -20,9 +20,10 @@ import android.os.PowerManager;
 import android.os.SystemClock;
 
 /**
- * Foreground service that records the battery in memory. Unplugged it records a discharge session; plugging in
- * throws that away and starts a charge session; unplugging keeps the finished charge as {@link #finished} and starts a
- * new discharge session. Nothing is written to storage.
+ * Foreground service that records the battery in memory for as long as the app is running. Unplugged it records a
+ * discharge session; plugging in throws that away and starts a charge session; unplugging keeps the finished charge as
+ * {@link #finished} and starts a new discharge session. Nothing is written to storage. Recording is only ended by
+ * {@link #ACTION_STOP} (the close button), which also tears down the notification.
  */
 public final class ChargeService extends Service {
     static final String ACTION_STOP = "stop", ACTION_RESET = "reset";
@@ -32,6 +33,8 @@ public final class ChargeService extends Service {
     /** Read by the activities on the main thread (the service also runs there). */
     static boolean running;
     static Session live, finished;
+    /** Set when the user pressed close; a later sticky restart is ignored until {@link #start}. */
+    static boolean userQuit;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private BatteryManager bm;
@@ -44,9 +47,19 @@ public final class ChargeService extends Service {
     private boolean registered;
     private final Thermals.Probe probe = new Thermals.Probe();
 
-    static void start(Context c) { c.startForegroundService(new Intent(c, ChargeService.class)); }
+    static void start(Context c) {
+        userQuit = false;
+        c.startForegroundService(new Intent(c, ChargeService.class));
+    }
 
     static void send(Context c, String action) { c.startService(new Intent(c, ChargeService.class).setAction(action)); }
+
+    /** Stop recording, drop the notification, and do not restart. */
+    static void quit(Context c) {
+        userQuit = true;
+        running = false;   // visible to the UI immediately; onStartCommand still does the teardown
+        send(c, ACTION_STOP);
+    }
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) {
@@ -97,7 +110,8 @@ public final class ChargeService extends Service {
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         String a = intent == null ? null : intent.getAction();
-        if (ACTION_STOP.equals(a)) {
+        if (ACTION_STOP.equals(a) || userQuit) {
+            userQuit = true;
             shutdown();
             stopSelf();
             return START_NOT_STICKY;
@@ -145,14 +159,8 @@ public final class ChargeService extends Service {
         if (charge) finished = null;
         live = new Session(System.currentTimeMillis(), charge, plug, interp);
         t0 = SystemClock.elapsedRealtime();
-        // CPU stays awake only while charging; a discharge record bridges sleep with CHARGE_COUNTER (see Session)
-        if (charge) {
-            if (wake == null) {
-                wake = getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "chargelog:charge");
-                wake.setReferenceCounted(false);
-            }
-            wake.acquire(24 * 3600_000L);
-        } else if (wake != null && wake.isHeld()) wake.release();
+        // Keep the CPU awake for the whole run so sampling never pauses (screen off, charge or discharge).
+        holdWake();
         lastNotif = 0;
         handler.removeCallbacks(tick);
         handler.removeCallbacks(tempTick);
@@ -183,8 +191,17 @@ public final class ChargeService extends Service {
                 bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER),
                 battery.getIntExtra(BatteryManager.EXTRA_STATUS, 0), plug != 0));
         remember(s);
+        holdWake();   // refresh the 24 h timeout so a long session is not cut off
         long now = SystemClock.elapsedRealtime();
         if (now - lastNotif >= 5000) { lastNotif = now; notifyNow(); }
+    }
+
+    private void holdWake() {
+        if (wake == null) {
+            wake = getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "chargelog:record");
+            wake.setReferenceCounted(false);
+        }
+        wake.acquire(24 * 3600_000L);
     }
 
     /** Stores a confident auto-detected unit/sign so later sessions start with it (reset in the settings). */
@@ -204,6 +221,7 @@ public final class ChargeService extends Service {
         live = null;
         running = false;
         stopForeground(STOP_FOREGROUND_REMOVE);
+        if (nm != null) nm.cancel(NOTIF);
     }
 
     @Override public void onDestroy() {
@@ -231,8 +249,12 @@ public final class ChargeService extends Service {
         }
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP), PendingIntent.FLAG_IMMUTABLE);
-        PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, ChargeService.class).setAction(ACTION_STOP),
-                PendingIntent.FLAG_IMMUTABLE);
+        // Opens MainActivity with ACTION_QUIT so the activity is finished as well, not just the service.
+        PendingIntent close = PendingIntent.getActivity(this, 1, new Intent(this, MainActivity.class)
+                        .setAction(MainActivity.ACTION_QUIT)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK
+                                | Intent.FLAG_ACTIVITY_NO_ANIMATION),
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         Notification.Builder b = new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(R.drawable.ic_stat)
                 .setContentTitle(title)
@@ -242,7 +264,7 @@ public final class ChargeService extends Service {
                 .setShowWhen(false)
                 .setCategory(Notification.CATEGORY_SERVICE)
                 .setContentIntent(open)
-                .addAction(new Notification.Action.Builder(null, getString(R.string.stop), stop).build());
+                .addAction(new Notification.Action.Builder(null, getString(R.string.close), close).build());
         if (Build.VERSION.SDK_INT >= 31) b.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE);
         return b.build();
     }

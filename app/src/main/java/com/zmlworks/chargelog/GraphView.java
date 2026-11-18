@@ -12,9 +12,9 @@ import android.view.View;
 import java.util.Locale;
 
 /**
- * Two stacked charts over elapsed time: battery % with the accumulated mAh, and power (W) with current (A).
- * Shows the whole session by default; pinch to zoom, drag to scroll, double tap to fit again. While the right edge
- * is at the latest sample the view follows new samples.
+ * Two stacked charts over elapsed time: battery % with the accumulated mAh, and power (W) with current (A)
+ * plus the highest sensor temperature on its own scale. Shows the whole session by default; pinch to zoom,
+ * drag to scroll, double tap to fit again. While the right edge is at the latest sample the view follows new samples.
  */
 final class GraphView extends View {
     static final int C_LEVEL = 0xFF4FB3FF, C_MAH = 0xFFF2B33D, C_POWER = 0xFFFF6B5B, C_CURRENT = 0xFF7BD88F,
@@ -116,16 +116,16 @@ final class GraphView extends View {
         panel(c, s, top, top + ph, t0, sp, 100, "%", mahMax, "mAh",
                 ctx.getString(R.string.legend_level), C_LEVEL, (ss, i) -> ss.samples.get(i).level,
                 ctx.getString(s.charge ? R.string.legend_mah : R.string.legend_used), C_MAH, Session::shownAccAt);
-        // Highest temperature across sensors is a slow session-long trend, like level / mAh,
-        // so it is overlaid here (own scale, range in the centre legend) rather than on the
-        // noisier power / current panel where a nearly-flat line would be hard to read.
-        float[] tr = tempRange(s);
-        if (tr != null) tempCurve(c, s, top, top + ph, t0, sp, tr[0], tr[1], ctx);
         float wMax = nice(maxOf(s, Session::shownWAt));
         float aMax = nice(maxOf(s, Session::shownAAt));
-        panel(c, s, top + ph + gap, bottom, t0, sp, wMax, "W", aMax, "A",
+        float lt = top + ph + gap;
+        panel(c, s, lt, bottom, t0, sp, wMax, "W", aMax, "A",
                 ctx.getString(s.charge ? R.string.legend_power : R.string.legend_dpower), C_POWER, Session::shownWAt,
                 ctx.getString(R.string.legend_current), C_CURRENT, Session::shownAAt);
+        // Highest temperature across sensors, on the power panel (own scale; range in the centre legend).
+        // Drawn after the power / current curves so the purple line stays visible.
+        float[] tr = tempRange(s);
+        if (tr != null) tempCurve(c, s, lt, bottom, t0, sp, tr[0], tr[1], ctx);
         if (zoom > 1.01f) {
             text.setColor(Ui.DIM);
             text.setTextAlign(Paint.Align.CENTER);

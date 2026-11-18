@@ -4,7 +4,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- keeps sampling with the screen off, only while charging -->
+    <!-- keeps sampling with the screen off, for as long as the app is running -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application

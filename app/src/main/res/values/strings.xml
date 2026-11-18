@@ -8,11 +8,9 @@
     <string name="notif_charging_text">%1$s ・ %2$s mAh ・ %3$s W</string>
     <string name="notif_discharging">放電を記録中 %1$d%% (%2$+d%%)</string>
     <string name="notif_discharging_text">%1$s ・ 使用 %2$s mAh ・ %3$s W</string>
-    <string name="stop">停止</string>
+    <string name="close">閉じる</string>
     <string name="settings">設定</string>
     <string name="settings_title">設定</string>
-    <string name="start_service">記録を開始</string>
-    <string name="stop_service">記録を停止</string>
     <string name="reset">リセット</string>
     <string name="view_finished">充電結果を表示</string>
     <string name="view_live">放電記録を表示</string>
@@ -67,5 +65,5 @@
     <string name="sensors_other">その他</string>
     <string name="s_capacity">公称バッテリー容量 (mAh)</string>
     <string name="s_capacity_hint">例: 5000 (空欄 = 未設定)</string>
-    <string name="s_note">記録はメモリ上だけで、ファイルには保存しません。アプリを停止すると消えます。</string>
+    <string name="s_note">記録はメモリ上だけで、ファイルには保存しません。「閉じる」でアプリを終了すると消えます。</string>
 </resources>

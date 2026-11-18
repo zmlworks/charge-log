@@ -108,7 +108,15 @@ public class ScreenshotsTest {
         return s;
     }
 
-    @After public void clear() { ChargeService.live = null; ChargeService.finished = null; ChargeService.running = false; }
+    @org.junit.Before public void silenceExit() { MainActivity.exitProcessOnQuit = false; }
+
+    @After public void clear() {
+        ChargeService.live = null;
+        ChargeService.finished = null;
+        ChargeService.running = false;
+        ChargeService.userQuit = false;
+        MainActivity.exitProcessOnQuit = true;
+    }
 
     @Test public void screens() throws Exception {
         File dir = new File("build/reports/screens");
